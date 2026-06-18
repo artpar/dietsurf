@@ -359,6 +359,15 @@ export function createShell(runtime) {
     }
     if (cmd === "echo") return argv.slice(1).join(" ");
     if (cmd === "node") return runFile(runtime, absPath(argv[1], cwd), argv.slice(2));
+    if (cmd === "clear") {
+      await runtime.clearHistory?.();
+      return "";
+    }
+    if (cmd === "reset") {
+      if (!runtime.resetProject) throw new Error("reset is not available");
+      await runtime.resetProject();
+      return "reset virtual project";
+    }
     if (cmd === "jobs") return "";
     if (cmd === "kill") return "";
     throw new Error(`unknown command: ${cmd}`);
@@ -406,6 +415,8 @@ export function createRuntime(base) {
     writeFile: base.writeFile,
     listFiles: base.listFiles,
     removeFile: base.removeFile,
+    resetProject: base.resetProject,
+    clearHistory: base.clearHistory,
     env: base.env || {},
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     log: base.log || console.log

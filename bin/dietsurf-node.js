@@ -44,6 +44,7 @@ try {
     ...fsRuntime,
     chrome,
     env: process.env,
+    clearHistory: () => fsRuntime.writeFile("/var/log/history.jsonl", ""),
     log: (...args) => console.log(...args)
   });
   const result = await runtime.runFile("/src/agent.js", process.argv.slice(2));

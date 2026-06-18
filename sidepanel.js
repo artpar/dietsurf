@@ -1,5 +1,13 @@
 import { loadModule, toErrorText } from "./kernel.js";
 
+const logListeners = new Set();
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (!message || message.type !== "workerLog") return false;
+  for (const listener of logListeners) listener(message.text);
+  return false;
+});
+
 function send(message) {
   return chrome.runtime.sendMessage(message).then((response) => {
     if (!response || !response.ok) throw new Error((response?.error || "worker error").split("\n")[0]);
@@ -26,6 +34,10 @@ async function main() {
     writeFile: (path, text) => send({ type: "writeFile", path, text }),
     listFiles: (path = "/") => send({ type: "listFiles", path }),
     shell: (command) => send({ type: "shell", command }),
+    onLog(listener) {
+      logListeners.add(listener);
+      return () => logListeners.delete(listener);
+    },
     interrupt: () => undefined,
     log: () => undefined
   };
