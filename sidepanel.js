@@ -2,7 +2,7 @@ import { loadModule, toErrorText } from "./kernel.js";
 
 function send(message) {
   return chrome.runtime.sendMessage(message).then((response) => {
-    if (!response || !response.ok) throw new Error(response?.error || "worker error");
+    if (!response || !response.ok) throw new Error((response?.error || "worker error").split("\n")[0]);
     return response.result;
   });
 }

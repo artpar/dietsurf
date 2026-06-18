@@ -1,26 +1,23 @@
+import Dexie from "dexie";
 import { PROJECT_FILES, createRuntime, toErrorText } from "./kernel.js";
 
 const STORE = "dietsurf.files";
+const db = new Dexie("dietsurf");
+db.version(1).stores({ files: "path" });
 
 async function allFiles() {
-  const data = await chrome.storage.local.get(STORE);
-  return data[STORE] || {};
-}
-
-async function saveFiles(files) {
-  await chrome.storage.local.set({ [STORE]: files });
+  const rows = await db.files.toArray();
+  return Object.fromEntries(rows.map((row) => [row.path, row.text]));
 }
 
 async function readFile(path) {
-  const files = await allFiles();
-  if (!(path in files)) throw new Error(`no such file: ${path}`);
-  return files[path];
+  const file = await db.files.get(path);
+  if (!file) throw new Error(`no such file: ${path}`);
+  return file.text;
 }
 
 async function writeFile(path, text) {
-  const files = await allFiles();
-  files[path] = String(text);
-  await saveFiles(files);
+  await db.files.put({ path, text: String(text) });
 }
 
 async function listFiles(path = "/") {
@@ -30,20 +27,28 @@ async function listFiles(path = "/") {
 }
 
 async function removeFile(path) {
-  const files = await allFiles();
-  delete files[path];
-  await saveFiles(files);
+  await db.files.delete(path);
+}
+
+async function migrateChromeStorage() {
+  const data = await chrome.storage.local.get(STORE);
+  const files = data[STORE] || {};
+  const paths = Object.keys(files);
+  if (!paths.length) return;
+  await db.files.bulkPut(paths.map((path) => ({ path, text: String(files[path]) })));
+  await chrome.storage.local.remove(STORE);
 }
 
 async function seedFiles() {
-  const files = await allFiles();
-  if (files["/src/agent.js"]) return;
+  await migrateChromeStorage();
+  if (await db.files.get("/src/agent.js")) return;
+  const files = [];
   for (const path of PROJECT_FILES) {
     const url = chrome.runtime.getURL(path.slice(1));
     const response = await fetch(url);
-    files[path] = response.ok ? await response.text() : "";
+    files.push({ path, text: response.ok ? await response.text() : "" });
   }
-  await saveFiles(files);
+  await db.files.bulkPut(files);
 }
 
 function chromeFacade() {
@@ -56,7 +61,42 @@ function chromeFacade() {
         return chrome.scripting.executeScript({
           ...rest,
           world: rest.world || "MAIN",
-          func: async (source, values) => (0, eval)(`(${source})`)(...(values || [])),
+          func: async (source, values) => {
+            const argv = values || [];
+            const args = argv;
+            const runtime = { argv, args };
+            const log = (...items) => console.log(...items);
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const done = (value = "") => {
+              throw { __dietsurfDone: true, value };
+            };
+            const unavailable = (name) => async () => {
+              throw new Error(`${name} is not available inside chrome.scripting.executeScript`);
+            };
+            const shell = unavailable("shell");
+            const llm = unavailable("llm");
+            const node = unavailable("node");
+            const readFile = unavailable("readFile");
+            const writeFile = unavailable("writeFile");
+            const listFiles = unavailable("listFiles");
+            const bindings = { argv, args, runtime, log, sleep, done, shell, llm, node, readFile, writeFile, listFiles };
+            const prior = {};
+            for (const [key, value] of Object.entries(bindings)) {
+              prior[key] = { exists: key in globalThis, value: globalThis[key] };
+              globalThis[key] = value;
+            }
+            try {
+              return await (0, eval)(`(${source})`)(...argv);
+            } catch (error) {
+              if (error && error.__dietsurfDone) return error.value;
+              throw error;
+            } finally {
+              for (const [key, state] of Object.entries(prior)) {
+                if (state.exists) globalThis[key] = state.value;
+                else delete globalThis[key];
+              }
+            }
+          },
           args: [String(func), args]
         });
       }

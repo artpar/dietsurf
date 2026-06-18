@@ -14,7 +14,8 @@ export async function main(runtime, argv) {
       "Available commands: cat, ls, pwd, cd, touch, rm, mkdir, cp, mv, echo, node, jobs, kill.\n" +
       "Use cat > file <<'EOF' ... EOF to write files.\n" +
       "Use node <<'EOF' ... EOF to run JavaScript.\n" +
-      "Inside node, globals include chrome, shell, llm, readFile, writeFile, listFiles, log, and done.\n" +
+      "Inside node, globals include process, Buffer, fs, path, crypto, require, chrome, shell, llm, readFile, writeFile, listFiles, log, and done.\n" +
+      "Use fs.promises for Node-style file operations; it is backed by the virtual filesystem.\n" +
       "For browser page work, use chrome.tabs.query and chrome.scripting.executeScript.\n" +
       "When done, run node <<'EOF'\\ndone(\"answer\")\\nEOF.\n\n" +
       "Return raw shell only. Do not use markdown fences, backticks, prose, or explanations.\n\n" +
@@ -100,7 +101,7 @@ export function render(runtime) {
       const result = await shell(command);
       if (result) write(result);
     } catch (error) {
-      write(error && error.stack ? error.stack : String(error));
+      write(error && error.message ? error.message : String(error));
     }
   });
 

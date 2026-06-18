@@ -1,15 +1,20 @@
 #!/usr/bin/env node
+import "dotenv/config";
 import { spawn } from "node:child_process";
-import { access, chmod, copyFile, mkdir, rm, stat } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 
 const root = process.cwd();
 const chromePath =
   process.env.CHROME_PATH ||
   (process.platform === "darwin" ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : "");
-const stage = path.join(root, "tmp", "plugin-src");
-const crxOut = path.join(root, "plugin.crx");
-const pemOut = path.join(root, "plugin.pem");
+const buildDir = path.join(root, "build");
+const unpacked = path.join(buildDir, "unpacked");
+const packSrc = path.join(buildDir, "pack-src");
+const crxOut = path.join(buildDir, "plugin.crx");
+const keyDir = process.env.DIETSURF_KEY_DIR || path.join(homedir(), ".dietsurf");
+const pemOut = process.env.DIETSURF_PLUGIN_KEY || path.join(keyDir, "plugin.pem");
 
 const files = [
   "manifest.json",
@@ -46,30 +51,56 @@ async function exists(file) {
 
 async function copyIntoStage(file) {
   const from = path.join(root, file);
-  const to = path.join(stage, file);
+  const to = path.join(unpacked, file);
   await mkdir(path.dirname(to), { recursive: true });
   await copyFile(from, to);
+}
+
+async function injectLocalLlmKey(dir) {
+  if (!process.env.LILAC_API_KEY) return false;
+  await writeFile(path.join(dir, "etc", "llm.json"), JSON.stringify({
+    baseUrl: "https://api.getlilac.com/v1",
+    apiKey: process.env.LILAC_API_KEY,
+    apiKeyEnv: "LILAC_API_KEY",
+    model: "minimaxai/minimax-m2.7"
+  }, null, 2));
+  return true;
 }
 
 if (!chromePath) throw new Error("set CHROME_PATH");
 
 await run("npm", ["run", "build"]);
-await rm(stage, { recursive: true, force: true });
-await mkdir(stage, { recursive: true });
+await rm(buildDir, { recursive: true, force: true });
+await mkdir(unpacked, { recursive: true });
+await mkdir(keyDir, { recursive: true });
 for (const file of files) await copyIntoStage(file);
+const injectedKey = await injectLocalLlmKey(unpacked);
+await rm(packSrc, { recursive: true, force: true });
+await mkdir(path.dirname(packSrc), { recursive: true });
+for (const file of files) {
+  const from = path.join(unpacked, file);
+  const to = path.join(packSrc, file);
+  await mkdir(path.dirname(to), { recursive: true });
+  await copyFile(from, to);
+}
+await injectLocalLlmKey(packSrc);
 
-const args = [`--pack-extension=${stage}`];
+const args = [`--pack-extension=${packSrc}`];
 if (await exists(pemOut)) args.push(`--pack-extension-key=${pemOut}`);
 await run(chromePath, args);
 
-const packedCrx = `${stage}.crx`;
-const packedPem = `${stage}.pem`;
+const packedCrx = `${packSrc}.crx`;
+const packedPem = `${packSrc}.pem`;
 await copyFile(packedCrx, crxOut);
 if (!(await exists(pemOut)) && await exists(packedPem)) await copyFile(packedPem, pemOut);
 if (await exists(pemOut)) await chmod(pemOut, 0o600);
+await rm(packSrc, { recursive: true, force: true });
+await rm(packedCrx, { force: true });
+await rm(packedPem, { force: true });
 
 const { size } = await stat(crxOut);
-await rm(path.dirname(stage), { recursive: true, force: true });
 
 console.log(`built ${path.relative(root, crxOut)} (${Math.round(size / 1024)} KiB)`);
-if (await exists(pemOut)) console.log(`using ${path.relative(root, pemOut)} for stable extension id`);
+console.log(`load unpacked from ${path.relative(root, unpacked)}`);
+if (injectedKey) console.log("injected LILAC_API_KEY into ignored build artifacts");
+if (await exists(pemOut)) console.log(`using signing key ${pemOut}`);

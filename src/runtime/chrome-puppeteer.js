@@ -51,7 +51,42 @@ export async function createPuppeteerChrome(config = {}) {
         const args = details.args || [];
         const source = String(details.func);
         const result = await page.evaluate(
-          async (source, args) => (0, eval)(`(${source})`)(...(args || [])),
+          async (source, values) => {
+            const argv = values || [];
+            const args = argv;
+            const runtime = { argv, args };
+            const log = (...items) => console.log(...items);
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const done = (value = "") => {
+              throw { __dietsurfDone: true, value };
+            };
+            const unavailable = (name) => async () => {
+              throw new Error(`${name} is not available inside chrome.scripting.executeScript`);
+            };
+            const shell = unavailable("shell");
+            const llm = unavailable("llm");
+            const node = unavailable("node");
+            const readFile = unavailable("readFile");
+            const writeFile = unavailable("writeFile");
+            const listFiles = unavailable("listFiles");
+            const bindings = { argv, args, runtime, log, sleep, done, shell, llm, node, readFile, writeFile, listFiles };
+            const prior = {};
+            for (const [key, value] of Object.entries(bindings)) {
+              prior[key] = { exists: key in globalThis, value: globalThis[key] };
+              globalThis[key] = value;
+            }
+            try {
+              return await (0, eval)(`(${source})`)(...argv);
+            } catch (error) {
+              if (error && error.__dietsurfDone) return error.value;
+              throw error;
+            } finally {
+              for (const [key, state] of Object.entries(prior)) {
+                if (state.exists) globalThis[key] = state.value;
+                else delete globalThis[key];
+              }
+            }
+          },
           source,
           args
         );

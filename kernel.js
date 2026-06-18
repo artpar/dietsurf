@@ -1,6 +1,9 @@
 import { generateText } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { Buffer } from "buffer";
 import { createEnvironment, execute } from "jslike";
+import pathShim from "path-browserify";
+import processShim from "process/browser.js";
 import { split } from "shlex";
 
 export const PROJECT_FILES = [
@@ -41,16 +44,38 @@ function dirOf(path) {
 
 function makeEnv(runtime) {
   const env = createEnvironment();
+  const module = { exports: {} };
   const globals = {
     runtime,
     argv: runtime.argv || [],
+    process: runtime.process,
+    Buffer: runtime.Buffer,
     chrome: runtime.chrome,
     llm: runtime.llm,
     shell: runtime.shell,
     node: runtime.node,
+    fs: runtime.fs,
+    path: runtime.path,
+    crypto: runtime.crypto,
+    require: runtime.require,
+    module,
+    exports: module.exports,
+    global: runtime.global,
+    globalThis: runtime.global,
     readFile: runtime.readFile,
     writeFile: runtime.writeFile,
     listFiles: runtime.listFiles,
+    env: runtime.env,
+    console: runtime.console,
+    fetch: runtime.fetch,
+    URL: globalThis.URL,
+    URLSearchParams: globalThis.URLSearchParams,
+    TextEncoder: globalThis.TextEncoder,
+    TextDecoder: globalThis.TextDecoder,
+    atob: globalThis.atob,
+    btoa: globalThis.btoa,
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
     sleep: runtime.sleep,
     log: runtime.log,
     done: runtime.done
@@ -61,9 +86,64 @@ function makeEnv(runtime) {
   return env;
 }
 
+function builtinModuleSource(modulePath) {
+  const name = modulePath.replace(/^node:/, "");
+  if (name === "fs") {
+    return [
+      'const fs = require("fs")',
+      "export default fs",
+      "export const promises = fs.promises",
+      "export const readFile = fs.readFile",
+      "export const writeFile = fs.writeFile",
+      "export const readdir = fs.readdir",
+      "export const rm = fs.rm",
+      "export const unlink = fs.unlink",
+      "export const mkdir = fs.mkdir",
+      "export const stat = fs.stat",
+      "export const access = fs.access",
+      "export const rename = fs.rename",
+      "export const cp = fs.cp"
+    ].join("\n");
+  }
+  if (name === "fs/promises") {
+    return [
+      'const fs = require("fs/promises")',
+      "export default fs",
+      "export const readFile = fs.readFile",
+      "export const writeFile = fs.writeFile",
+      "export const readdir = fs.readdir",
+      "export const rm = fs.rm",
+      "export const unlink = fs.unlink",
+      "export const mkdir = fs.mkdir",
+      "export const stat = fs.stat",
+      "export const access = fs.access",
+      "export const rename = fs.rename",
+      "export const cp = fs.cp"
+    ].join("\n");
+  }
+  if (name === "path") {
+    return [
+      'const path = require("path")',
+      "export default path",
+      "export const join = path.join",
+      "export const resolve = path.resolve",
+      "export const dirname = path.dirname",
+      "export const basename = path.basename",
+      "export const extname = path.extname",
+      "export const normalize = path.normalize"
+    ].join("\n");
+  }
+  if (name === "buffer") return 'const buffer = require("buffer")\nexport default buffer\nexport const Buffer = buffer.Buffer';
+  if (name === "process") return 'const process = require("process")\nexport default process';
+  if (name === "crypto") return 'const crypto = require("crypto")\nexport default crypto';
+  return "";
+}
+
 function resolverFor(runtime) {
   return {
     async resolve(modulePath, fromPath = "/src/agent.js") {
+      const builtin = builtinModuleSource(modulePath);
+      if (builtin) return { path: modulePath, code: builtin };
       if (!modulePath.startsWith(".") && !modulePath.startsWith("/")) return null;
       const base = modulePath.startsWith("/") ? "/" : dirOf(fromPath);
       let path = absPath(modulePath, base);
@@ -122,6 +202,122 @@ function formatLs(paths, dir, recursive) {
     else out.add(rest.split("/")[0] + (rest.includes("/") ? "/" : ""));
   }
   return [...out].join("\n");
+}
+
+function encodingOf(options) {
+  if (typeof options === "string") return options;
+  if (options && typeof options === "object") return options.encoding;
+  return "";
+}
+
+function textOf(value, encoding = "utf8") {
+  if (Buffer.isBuffer(value)) return value.toString(encoding);
+  if (value instanceof Uint8Array) return Buffer.from(value).toString(encoding);
+  return String(value);
+}
+
+function fileStat(path, text, directory) {
+  return {
+    path,
+    size: directory ? 0 : Buffer.byteLength(text || ""),
+    isFile: () => !directory,
+    isDirectory: () => directory,
+    isSymbolicLink: () => false
+  };
+}
+
+function createFs(runtime) {
+  const filePath = (path) => absPath(String(path), runtime.cwd || "/");
+  const promises = {
+    async readFile(path, options) {
+      const text = await runtime.readFile(filePath(path));
+      return encodingOf(options) ? text : Buffer.from(text);
+    },
+    async writeFile(path, data, options) {
+      await runtime.writeFile(filePath(path), textOf(data, encodingOf(options) || "utf8"));
+    },
+    async readdir(path = ".") {
+      const dir = filePath(path);
+      const prefix = dir === "/" ? "/" : `${dir.replace(/\/$/, "")}/`;
+      const out = new Set();
+      for (const file of await runtime.listFiles(dir)) {
+        if (file === dir) continue;
+        const rest = file.startsWith(prefix) ? file.slice(prefix.length) : "";
+        if (rest) out.add(rest.split("/")[0]);
+      }
+      return [...out].sort();
+    },
+    async rm(path) {
+      await runtime.removeFile(filePath(path));
+    },
+    async unlink(path) {
+      await runtime.removeFile(filePath(path));
+    },
+    async mkdir() {},
+    async stat(path) {
+      const target = filePath(path);
+      try {
+        return fileStat(target, await runtime.readFile(target), false);
+      } catch (error) {
+        const children = await runtime.listFiles(target);
+        if (children.some((file) => file !== target)) return fileStat(target, "", true);
+        throw error;
+      }
+    },
+    async access(path) {
+      await promises.stat(path);
+    },
+    async rename(from, to) {
+      const source = filePath(from);
+      const target = filePath(to);
+      await runtime.writeFile(target, await runtime.readFile(source));
+      await runtime.removeFile(source);
+    },
+    async cp(from, to) {
+      await runtime.writeFile(filePath(to), await runtime.readFile(filePath(from)));
+    }
+  };
+  const callback = (fn) => (...args) => {
+    const cb = typeof args[args.length - 1] === "function" ? args.pop() : undefined;
+    const promise = fn(...args);
+    if (cb) promise.then((value) => cb(null, value), cb);
+    return promise;
+  };
+  return {
+    promises,
+    readFile: callback(promises.readFile),
+    writeFile: callback(promises.writeFile),
+    readdir: callback(promises.readdir),
+    rm: callback(promises.rm),
+    unlink: callback(promises.unlink),
+    mkdir: callback(promises.mkdir),
+    stat: callback(promises.stat),
+    access: callback(promises.access),
+    rename: callback(promises.rename),
+    cp: callback(promises.cp)
+  };
+}
+
+function createProcess(runtime, base) {
+  return {
+    ...processShim,
+    ...base.process,
+    env: runtime.env,
+    argv: runtime.argv,
+    browser: !globalThis.process?.versions?.node,
+    versions: { ...(processShim.versions || {}), ...(globalThis.process?.versions || {}) },
+    platform: globalThis.process?.platform || "browser",
+    cwd: () => runtime.cwd || "/",
+    nextTick: processShim.nextTick || ((fn, ...args) => Promise.resolve().then(() => fn(...args)))
+  };
+}
+
+function createRequire(runtime) {
+  return function require(name) {
+    const key = String(name).replace(/^node:/, "");
+    if (key in runtime.modules) return runtime.modules[key];
+    throw new Error(`cannot find module: ${name}`);
+  };
 }
 
 export function createShell(runtime) {
@@ -204,6 +400,7 @@ export function createShell(runtime) {
 export function createRuntime(base) {
   const runtime = {
     argv: [],
+    cwd: "/",
     chrome: base.chrome,
     readFile: base.readFile,
     writeFile: base.writeFile,
@@ -212,6 +409,36 @@ export function createRuntime(base) {
     env: base.env || {},
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     log: base.log || console.log
+  };
+  runtime.console = base.console || {
+    log: (...args) => runtime.log(...args),
+    warn: (...args) => runtime.log(...args),
+    error: (...args) => runtime.log(...args)
+  };
+  runtime.fetch = base.fetch || (globalThis.fetch ? globalThis.fetch.bind(globalThis) : undefined);
+  runtime.Buffer = Buffer;
+  runtime.path = pathShim.posix || pathShim;
+  runtime.crypto = base.crypto || globalThis.crypto;
+  runtime.fs = createFs(runtime);
+  runtime.process = createProcess(runtime, base);
+  runtime.modules = {
+    fs: runtime.fs,
+    "fs/promises": runtime.fs.promises,
+    path: runtime.path,
+    buffer: { Buffer },
+    process: runtime.process,
+    crypto: runtime.crypto
+  };
+  runtime.require = createRequire(runtime);
+  runtime.global = {
+    runtime,
+    argv: runtime.argv,
+    process: runtime.process,
+    Buffer,
+    fs: runtime.fs,
+    path: runtime.path,
+    crypto: runtime.crypto,
+    require: runtime.require
   };
   runtime.llm = async function llm(input) {
     const { baseUrl, apiKey, apiKeyEnv, model } = JSON.parse(await runtime.readFile("/etc/llm.json"));
