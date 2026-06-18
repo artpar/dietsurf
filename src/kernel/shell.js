@@ -128,11 +128,16 @@ function splitConditionals(line) {
 export function createShell(runtime) {
   let cwd = "/";
 
+  function checkAbort() {
+    runtime.throwIfAborted?.();
+  }
+
   async function allPaths() {
     return runtime.listFiles("/");
   }
 
   async function expandPaths(pattern) {
+    checkAbort();
     const target = absPath(pattern, cwd);
     if (!target.includes("*") && !target.includes("?")) return [target];
     const match = wildcardRegex(target);
@@ -140,9 +145,11 @@ export function createShell(runtime) {
   }
 
   async function readInputs(args, input) {
+    checkAbort();
     if (args.length === 0) return input ?? "";
     const out = [];
     for (const arg of args) {
+      checkAbort();
       for (const path of await expandPaths(arg)) out.push(await runtime.readFile(path));
     }
     return out.join("\n");
@@ -163,16 +170,19 @@ export function createShell(runtime) {
   }
 
   async function runInline(source, argv = []) {
+    checkAbort();
     const output = [];
     const log = (...items) => output.push(items.map(formatLogItem).join(" "));
     const nextRuntime = {
       ...runtime,
       argv,
       log,
-      console: { log, warn: log, error: log }
+      console: { log, warn: log, error: log },
+      throwIfAborted: checkAbort
     };
     try {
       await runSource(nextRuntime, source, "/tmp/stdin.js");
+      checkAbort();
     } catch (error) {
       if (error && error.__dietsurfDone) output.push(String(error.value ?? ""));
       else throw error;
@@ -181,6 +191,7 @@ export function createShell(runtime) {
   }
 
   async function execArgv(argv, input) {
+    checkAbort();
     const cmd = argv[0];
     if (!cmd) return "";
     if (cmd === "pwd") return cwd;
@@ -291,9 +302,11 @@ export function createShell(runtime) {
   }
 
   async function executePipeline(line) {
+    checkAbort();
     let input;
     let redirect = null;
     for (const part of splitOperator(line, "|")) {
+      checkAbort();
       const parsed = parseRedirects(split(part).map((arg) => expandEnv(arg, runtime.env || {})));
       redirect = parsed.stdout || redirect;
       input = await execArgv(parsed.argv, input);
@@ -308,11 +321,13 @@ export function createShell(runtime) {
   }
 
   async function executeLine(line) {
+    checkAbort();
     const groups = splitConditionals(line);
     const output = [];
     let lastOk = true;
     let lastError;
     for (const group of groups) {
+      checkAbort();
       if (group.op === "&&" && !lastOk) continue;
       if (group.op === "||" && lastOk) continue;
       try {
@@ -333,6 +348,7 @@ export function createShell(runtime) {
     const lines = String(script).replace(/\r\n/g, "\n").split("\n");
     const output = [];
     for (let i = 0; i < lines.length;) {
+      checkAbort();
       const line = lines[i].trim();
       if (!line || line.startsWith("#")) {
         i++;

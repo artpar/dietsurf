@@ -5,6 +5,7 @@ const STORE = "dietsurf.files";
 const db = new Dexie("dietsurf");
 db.version(1).stores({ files: "path" });
 const fileCache = new Map();
+let activeRun = null;
 
 function enableActionSidePanel() {
   if (!chrome.sidePanel?.setPanelBehavior) return;
@@ -142,10 +143,20 @@ async function upgradeDefaultFiles() {
   ) || (
     text.includes("Available commands: cat, ls, pwd, cd, touch, rm, mkdir, cp, mv, echo, node, clear, reset, jobs, kill, which, grep, head, find.") &&
     !text.includes("/etc/browser.json and /src/runtime/chrome-puppeteer.js are only for running the same agent from real host Node")
+  ) || (
+    text.includes('input.placeholder = "goal or shell command"') &&
+    text.includes('write("DietSurf")') &&
+    !text.includes("interruptRun")
   ));
   await upgradeDefaultFile("/src/ui.css", (text) => (
     text.includes("#dietsurf-prompt:focus") &&
     !text.includes("#dietsurf-status")
+  ) || (
+    text.includes("grid-template-rows: 1fr auto auto") &&
+    !text.includes("height: 100dvh")
+  ) || (
+    text.includes('#dietsurf-status[data-state="error"]') &&
+    !text.includes('#dietsurf-status[data-state="aborted"]')
   ));
 }
 
@@ -249,11 +260,30 @@ enableActionSidePanel();
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
+    if (message.type === "interrupt") {
+      if (activeRun) {
+        activeRun.controller.abort();
+        return { ok: true, result: "aborting" };
+      }
+      return { ok: true, result: "idle" };
+    }
     const rt = await runtime();
     if (message.type === "shell") {
-      const result = await rt.shell(message.command);
-      if (message.command.trim() !== "clear") await appendHistory({ command: message.command, result });
-      return { ok: true, result };
+      if (activeRun) throw new Error("shell is already running");
+      const controller = new AbortController();
+      activeRun = { controller };
+      rt.abortSignal = controller.signal;
+      try {
+        const result = await rt.shell(message.command);
+        if (message.command.trim() !== "clear") await appendHistory({ command: message.command, result });
+        return { ok: true, result };
+      } catch (error) {
+        if (controller.signal.aborted) throw new Error("aborted");
+        throw error;
+      } finally {
+        if (activeRun?.controller === controller) activeRun = null;
+        if (rt.abortSignal === controller.signal) rt.abortSignal = undefined;
+      }
     }
     if (message.type === "readFile") return { ok: true, result: await readFile(message.path) };
     if (message.type === "writeFile") {

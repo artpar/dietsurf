@@ -124,6 +124,7 @@ export function render(runtime) {
   app.append(root);
 
   let running = false;
+  let interrupting = false;
   let statusTimer;
 
   const write = (value = "") => {
@@ -162,6 +163,18 @@ export function render(runtime) {
     setStatus(state, state);
   };
 
+  const interruptRun = async () => {
+    if (!running || interrupting) return;
+    interrupting = true;
+    write("^C");
+    setStatus("running", "interrupting");
+    try {
+      await runtime.interrupt?.();
+    } catch (error) {
+      write(error && error.message ? error.message : String(error));
+    }
+  };
+
   const complete = (script) => {
     const lines = script.replace(/\r\n/g, "\n").split("\n");
     for (let i = 0; i < lines.length; i++) {
@@ -189,11 +202,24 @@ export function render(runtime) {
   });
 
   input.addEventListener("keydown", async (event) => {
+    if (running && (event.key === "Escape" || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c"))) {
+      event.preventDefault();
+      await interruptRun();
+      return;
+    }
     if (event.key !== "Enter") return;
     if (event.shiftKey || !complete(input.value)) return;
     event.preventDefault();
     const command = input.value.trim();
     if (!command) return;
+    if (running) {
+      if (["kill", "cancel", "abort", "^c"].includes(command.toLowerCase())) {
+        input.value = "";
+        input.style.height = "auto";
+        await interruptRun();
+      }
+      return;
+    }
     input.value = "";
     input.style.height = "auto";
     if (command === "clear") {
@@ -215,10 +241,15 @@ export function render(runtime) {
       if (result && !alreadyShown(result)) write(result);
       stopStatus("done");
     } catch (error) {
-      stopStatus("error");
-      write(error && error.message ? error.message : String(error));
+      const message = error && error.message ? error.message : String(error);
+      if (message === "aborted" || message === "Error: aborted") stopStatus("aborted");
+      else {
+        stopStatus("error");
+        write(message);
+      }
     } finally {
       running = false;
+      interrupting = false;
     }
   });
 

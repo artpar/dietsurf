@@ -11,6 +11,12 @@ function isDone(error) {
   return error && error.__dietsurfDone;
 }
 
+function abortError() {
+  const error = new Error("aborted");
+  error.name = "AbortError";
+  return error;
+}
+
 function createProcess(runtime, base) {
   return {
     ...processShim,
@@ -46,10 +52,21 @@ export function createRuntime(base) {
     removeFile: base.removeFile,
     resetProject: base.resetProject,
     clearHistory: base.clearHistory,
+    abortSignal: base.abortSignal,
     env: base.env || {},
-    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     log: base.log || console.log
   };
+  runtime.throwIfAborted = () => {
+    if (runtime.abortSignal?.aborted) throw abortError();
+  };
+  runtime.sleep = (ms) => new Promise((resolve, reject) => {
+    runtime.throwIfAborted();
+    const timer = setTimeout(resolve, ms);
+    runtime.abortSignal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(abortError());
+    }, { once: true });
+  });
   runtime.console = base.console || {
     log: (...args) => runtime.log(...args),
     warn: (...args) => runtime.log(...args),
@@ -81,12 +98,19 @@ export function createRuntime(base) {
     require: runtime.require
   };
   async function query(input, options = {}) {
+    runtime.throwIfAborted();
     const { baseUrl, apiKey, apiKeyEnv, model } = JSON.parse(await runtime.readFile("/etc/llm.json"));
     const key = apiKey || runtime.env[apiKeyEnv];
     if (!key) throw new Error(`missing /etc/llm.json apiKey${apiKeyEnv ? ` or ${apiKeyEnv}` : ""}`);
     const provider = createOpenAICompatible({ name: "byok", apiKey: key, baseURL: baseUrl });
     const messages = Array.isArray(input) ? input : [{ role: "user", content: String(input) }];
-    const request = { model: provider(model), messages, temperature: 0, allowSystemInMessages: true };
+    const request = {
+      model: provider(model),
+      messages,
+      temperature: 0,
+      allowSystemInMessages: true,
+      abortSignal: runtime.abortSignal
+    };
     if (options.tool === "bash") {
       request.tools = {
         bash: tool({
@@ -106,6 +130,7 @@ export function createRuntime(base) {
       };
     }
     const result = await generateText(request);
+    runtime.throwIfAborted();
     return {
       text: result.text.trim(),
       toolCalls: result.toolCalls,

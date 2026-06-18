@@ -35,7 +35,10 @@ chrome.runtime.onMessage.addListener((message) => {
 
 function send(message) {
   return chrome.runtime.sendMessage(message).then((response) => {
-    if (!response || !response.ok) throw new Error((response?.error || "worker error").split("\n")[0]);
+    if (!response || !response.ok) {
+      const error = (response?.error || "worker error").split("\n")[0].replace(/^Error:\s*/, "");
+      throw new Error(error);
+    }
     return response.result;
   });
 }
@@ -75,11 +78,11 @@ async function main() {
     writeFile: (path, text) => run(() => send({ type: "writeFile", path, text })),
     listFiles: (path = "/") => send({ type: "listFiles", path }),
     shell: (command) => run(() => send({ type: "shell", command })),
+    interrupt: () => send({ type: "interrupt" }),
     onLog(listener) {
       logListeners.add(listener);
       return () => logListeners.delete(listener);
     },
-    interrupt: () => undefined,
     log: () => undefined
   };
 
