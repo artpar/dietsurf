@@ -1,12 +1,25 @@
+const WORKSPACE = "";
+
+function workspaceOf(runtime) {
+  const agentPath = runtime?.agentPath || runtime?.entryPath || "";
+  const suffix = "/src/agent.js";
+  if (agentPath.endsWith(suffix)) return agentPath.slice(0, -suffix.length);
+  return WORKSPACE;
+}
+
+function workspacePath(runtime, path) {
+  return `${workspaceOf(runtime)}${path}`;
+}
+
 export async function main(runtime, argv) {
   const { shell, query, log, readFile } = runtime;
   const goal = argv.join(" ").trim();
   if (!goal) {
-    log("usage: node /src/agent.js \"goal\"");
+    log(`usage: node ${workspacePath(runtime, "/src/agent.js")} "goal"`);
     return "";
   }
 
-  const profile = await readFile("/etc/profile").catch(() => "");
+  const profile = await readFile(workspacePath(runtime, "/etc/profile")).catch(() => "");
   const system = [
     "You are running inside DietSurf, a tiny Mini-SWE-style browser agent.",
     profile.trim(),
@@ -182,7 +195,7 @@ export function render(runtime) {
   const toShell = (value) => {
     const first = value.trim().split(/\s+/, 1)[0];
     if (value.includes("\n") || shellCommands.has(first)) return value;
-    return "node /src/agent.js " + JSON.stringify(value);
+    return `node ${workspacePath(runtime, "/src/agent.js")} ` + JSON.stringify(value);
   };
 
   input.addEventListener("input", () => {
@@ -242,7 +255,8 @@ export function render(runtime) {
     }
   });
 
-  write("DietSurf");
+  const workspace = workspaceOf(runtime);
+  write(`DietSurf${workspace ? ` ${workspace}` : ""}`);
   write("ls -R /");
 }
 

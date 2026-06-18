@@ -20,7 +20,9 @@ function run(command, args) {
 }
 
 async function readLog(page) {
-  return page.$eval("#dietsurf-log", (el) => el.textContent);
+  return page.evaluate(() => (
+    document.querySelector("#dietsurf-main-host")?.shadowRoot?.querySelector("#dietsurf-log")?.textContent || ""
+  ));
 }
 
 async function waitForLog(page, text, timeoutMs = 120000) {
@@ -61,23 +63,29 @@ try {
 
   const panel = await browser.newPage();
   await panel.goto(`chrome-extension://${extensionId}/sidepanel.html`, { waitUntil: "networkidle0" });
-  await panel.waitForSelector("#dietsurf-prompt", { timeout: 10000 });
+  await panel.waitForSelector("#dietsurf-main-host", { timeout: 10000 });
 
-  const seed = await panel.evaluate((apiKey) => chrome.runtime.sendMessage({
-    type: "writeFile",
-    path: "/etc/llm.json",
-    text: JSON.stringify({
-      baseUrl: "https://api.getlilac.com/v1",
-      apiKey,
-      apiKeyEnv: "LILAC_API_KEY",
-      model: "minimaxai/minimax-m2.7"
-    }, null, 2)
-  }), process.env.LILAC_API_KEY);
-  if (!seed?.ok) throw new Error(seed?.error || "failed to seed /etc/llm.json");
+  const seed = await panel.evaluate((apiKey) => Promise.all(["main", "staging"].map((workspace) => (
+    chrome.runtime.sendMessage({
+      type: "writeFile",
+      path: `/${workspace}/etc/llm.json`,
+      text: JSON.stringify({
+        baseUrl: "https://api.getlilac.com/v1",
+        apiKey,
+        apiKeyEnv: "LILAC_API_KEY",
+        model: "minimaxai/minimax-m2.7"
+      }, null, 2)
+    })
+  ))), process.env.LILAC_API_KEY);
+  const failed = seed.find((item) => !item?.ok);
+  if (failed) throw new Error(failed?.error || "failed to seed llm config");
 
   await panel.bringToFront();
-  await panel.click("#dietsurf-prompt");
-  await panel.keyboard.type('node /src/agent.js "read the active tab title and return only the title"', { delay: 2 });
+  const prompt = await panel.evaluateHandle(() => (
+    document.querySelector("#dietsurf-main-host").shadowRoot.querySelector("#dietsurf-prompt")
+  ));
+  await prompt.click();
+  await panel.keyboard.type('node /main/src/agent.js "read the active tab title and return only the title"', { delay: 2 });
   await panel.keyboard.press("Enter");
   await target.bringToFront();
 

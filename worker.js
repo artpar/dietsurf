@@ -2,10 +2,12 @@ import Dexie from "dexie";
 import { PROJECT_FILES, createRuntime, toErrorText } from "./kernel.js";
 
 const STORE = "dietsurf.files";
+const WORKSPACES = ["main", "staging"];
 const db = new Dexie("dietsurf");
 db.version(1).stores({ files: "path" });
 const fileCache = new Map();
-let activeRun = null;
+const activeRuns = new Map();
+const runtimePromises = new Map();
 
 function enableActionSidePanel() {
   if (!chrome.sidePanel?.setPanelBehavior) return;
@@ -19,9 +21,9 @@ function formatLogArg(value) {
   return JSON.stringify(value);
 }
 
-function logToPanel(...args) {
+function logToPanel(workspace, ...args) {
   console.log(...args);
-  chrome.runtime.sendMessage({ type: "workerLog", text: args.map(formatLogArg).join(" ") })
+  chrome.runtime.sendMessage({ type: "workerLog", workspace, text: args.map(formatLogArg).join(" ") })
     .catch(() => undefined);
 }
 
@@ -79,12 +81,37 @@ async function migrateChromeStorage() {
   await chrome.storage.local.remove(STORE);
 }
 
-async function packagedFiles() {
+function workspacePath(workspace, path) {
+  return `/${workspace}${path}`;
+}
+
+function workspaceText(workspace, path, text) {
+  return String(text);
+}
+
+function workspaceOf(value) {
+  return WORKSPACES.includes(value) ? value : "main";
+}
+
+async function packagedSourceFiles() {
   const files = [];
   for (const path of PROJECT_FILES) {
     const url = chrome.runtime.getURL(path.slice(1));
     const response = await fetch(url);
     files.push({ path, text: response.ok ? await response.text() : "" });
+  }
+  return files;
+}
+
+async function packagedFiles() {
+  const files = [];
+  for (const file of await packagedSourceFiles()) {
+    for (const workspace of WORKSPACES) {
+      files.push({
+        path: workspacePath(workspace, file.path),
+        text: workspaceText(workspace, file.path, file.text)
+      });
+    }
   }
   return files;
 }
@@ -95,57 +122,83 @@ async function resetProject() {
   await db.files.bulkPut(files);
   fileCache.clear();
   for (const file of files) fileCache.set(file.path, file.text);
+  runtimePromises?.clear?.();
   notifyFileChanged("/");
 }
 
 async function seedMissingFiles() {
   const files = [];
-  for (const path of PROJECT_FILES) {
-    if (await db.files.get(path)) continue;
-    const url = chrome.runtime.getURL(path.slice(1));
-    const response = await fetch(url);
-    files.push({ path, text: response.ok ? await response.text() : "" });
+  for (const file of await packagedFiles()) {
+    if (await db.files.get(file.path)) continue;
+    files.push(file);
   }
   if (files.length) await db.files.bulkPut(files);
   for (const file of files) fileCache.set(file.path, file.text);
 }
 
-async function upgradeDefaultFile(path, shouldReplace) {
+async function removeLegacyRootFiles() {
+  const paths = (await db.files.toArray())
+    .map((row) => row.path)
+    .filter((path) => !WORKSPACES.some((workspace) => path === `/${workspace}` || path.startsWith(`/${workspace}/`)));
+  if (!paths.length) return;
+  await db.files.bulkDelete(paths);
+  for (const path of paths) fileCache.delete(path);
+}
+
+async function upgradeDefaultFile(workspace, sourcePath, shouldReplace) {
+  const path = workspacePath(workspace, sourcePath);
   const current = await db.files.get(path);
   if (!current) return;
   if (!shouldReplace(current.text)) return;
-  const response = await fetch(chrome.runtime.getURL(path.slice(1)));
-  if (response.ok) await writeFile(path, await response.text());
+  const response = await fetch(chrome.runtime.getURL(sourcePath.slice(1)));
+  if (response.ok) await writeFile(path, workspaceText(workspace, sourcePath, await response.text()));
 }
 
 async function upgradeDefaultFiles() {
-  await upgradeDefaultFile("/etc/profile", (text) => (
+  for (const workspace of WORKSPACES) await upgradeWorkspaceDefaultFiles(workspace);
+}
+
+async function upgradeWorkspaceDefaultFiles(workspace) {
+  await upgradeDefaultFile(workspace, "/etc/profile", (text) => (
     text.trim() === "# DietSurf profile"
   ) || (
     text.includes("DietSurf is a tiny shell over a virtual project.") &&
     !text.includes("Host package/build commands such as npm")
   ));
-  await upgradeDefaultFile("/manifest.json", (text) => (
+  await upgradeDefaultFile(workspace, "/manifest.json", (text) => (
     text.includes('"service_worker": "dist/worker.js"')
   ));
-  await upgradeDefaultFile("/sidepanel.html", (text) => (
+  await upgradeDefaultFile(workspace, "/sidepanel.html", (text) => (
     text.includes('src="dist/sidepanel.js"')
   ));
-  await upgradeDefaultFile("/package.json", (text) => (
+  await upgradeDefaultFile(workspace, "/package.json", (text) => (
     text.includes("--outdir=dist")
   ));
-  await upgradeDefaultFile("/sidepanel.js", (text) => (
+  await upgradeDefaultFile(workspace, "/kernel.js", (text) => (
+    text.includes("./src/kernel/monetize.js")
+  ));
+  await upgradeDefaultFile(workspace, "/sidepanel.js", (text) => (
     text.includes("interrupt: () => undefined")
   ) || (
     text.includes('throw new Error((response?.error || "worker error").split("\\n")[0]);')
+  ) || (
+    !text.includes("/main/src/agent.js") ||
+    !text.includes("/staging/src/agent.js")
   ));
-  await upgradeDefaultFile("/worker.js", (text) => (
+  await upgradeDefaultFile(workspace, "/worker.js", (text) => (
     text.includes('"service_worker": "dist/worker.js"')
   ) || (
     text.includes('await upgradeDefaultFile("/etc/profile"') &&
     !text.includes('await upgradeDefaultFile("/sidepanel.html"')
   ));
-  await upgradeDefaultFile("/src/agent.js", (text) => (
+  await upgradeDefaultFile(workspace, "/src/agent.js", (text) => (
+    !text.includes("export async function main") ||
+    !text.includes("export function render")
+  ) || (
+    text.includes('const WORKSPACE = "/main";')
+  ) || (
+    text.includes('const WORKSPACE = "/staging";')
+  ) || (
     text.includes('input.placeholder = "node /src/agent.js \\"goal\\""') &&
     text.includes("const result = await shell(command);")
   ) || (
@@ -180,7 +233,7 @@ async function upgradeDefaultFiles() {
   ) || (
     text.includes("Use fs.promises for Node-style file operations; it is backed by the virtual filesystem.")
   ));
-  await upgradeDefaultFile("/src/ui.css", (text) => (
+  await upgradeDefaultFile(workspace, "/src/ui.css", (text) => (
     text.includes("#dietsurf-prompt:focus") &&
     !text.includes("#dietsurf-status")
   ) || (
@@ -194,14 +247,14 @@ async function upgradeDefaultFiles() {
 
 async function seedFiles() {
   await migrateChromeStorage();
-  if (await db.files.get("/src/agent.js")) {
-    await hydrateFileCache();
-    await seedMissingFiles();
-    await upgradeDefaultFiles();
-    await hydrateFileCache();
+  if (!(await db.files.get("/main/src/agent.js")) || !(await db.files.get("/staging/src/agent.js"))) {
+    await resetProject();
     return;
   }
-  await db.files.bulkPut(await packagedFiles());
+  await hydrateFileCache();
+  await seedMissingFiles();
+  await removeLegacyRootFiles();
+  await upgradeDefaultFiles();
   await hydrateFileCache();
 }
 
@@ -258,11 +311,13 @@ function chromeFacade() {
   };
 }
 
-let runtimePromise;
-async function runtime() {
+async function runtime(workspace) {
   await seedFiles();
-  if (!runtimePromise) {
-    runtimePromise = Promise.resolve(createRuntime({
+  const key = workspaceOf(workspace);
+  if (!runtimePromises.has(key)) {
+    runtimePromises.set(key, Promise.resolve(createRuntime({
+      workspace: key,
+      llmConfigPath: `/${key}/etc/llm.json`,
       chrome: chromeFacade(),
       readFile,
       readFileSync,
@@ -270,17 +325,18 @@ async function runtime() {
       listFiles,
       removeFile,
       resetProject,
-      clearHistory: () => writeFile("/var/log/history.jsonl", ""),
-      log: logToPanel
-    }));
+      clearHistory: () => writeFile(`/${key}/var/log/history.jsonl`, ""),
+      log: (...args) => logToPanel(key, ...args)
+    })));
   }
-  return runtimePromise;
+  return runtimePromises.get(key);
 }
 
-async function appendHistory(record) {
+async function appendHistory(workspace, record) {
   const line = JSON.stringify({ ts: new Date().toISOString(), ...record }) + "\n";
-  const prior = await readFile("/var/log/history.jsonl").catch(() => "");
-  await writeFile("/var/log/history.jsonl", prior + line);
+  const path = `/${workspaceOf(workspace)}/var/log/history.jsonl`;
+  const prior = await readFile(path).catch(() => "");
+  await writeFile(path, prior + line);
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -292,30 +348,32 @@ enableActionSidePanel();
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
+    const workspace = workspaceOf(message.workspace);
     if (message.type === "interrupt") {
+      const activeRun = activeRuns.get(workspace);
       if (activeRun) {
         activeRun.controller.abort();
         return { ok: true, result: "aborting" };
       }
       return { ok: true, result: "idle" };
     }
-    const rt = await runtime();
+    const rt = await runtime(workspace);
     if (message.type === "shell") {
-      if (activeRun) throw new Error("shell is already running");
+      if (activeRuns.has(workspace)) throw new Error(`${workspace} shell is already running`);
       const controller = new AbortController();
-      activeRun = { controller };
+      activeRuns.set(workspace, { controller });
       rt.abortSignal = controller.signal;
       try {
         const result = await rt.shell(message.command);
         if (!["clear", "reset"].includes(message.command.trim())) {
-          await appendHistory({ command: message.command, result });
+          await appendHistory(workspace, { command: message.command, result });
         }
         return { ok: true, result };
       } catch (error) {
         if (controller.signal.aborted) throw new Error("aborted");
         throw error;
       } finally {
-        if (activeRun?.controller === controller) activeRun = null;
+        if (activeRuns.get(workspace)?.controller === controller) activeRuns.delete(workspace);
         if (rt.abortSignal === controller.signal) rt.abortSignal = undefined;
       }
     }

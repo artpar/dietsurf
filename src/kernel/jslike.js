@@ -130,7 +130,7 @@ export async function loadModule(runtime, path) {
 }
 
 export async function runFile(runtime, path, argv = []) {
-  const nextRuntime = { ...runtime, argv };
+  const nextRuntime = { ...runtime, argv, agentPath: path, entryPath: path };
   const mod = await loadModule(nextRuntime, path);
   if (mod && typeof mod.main === "function") return mod.main(nextRuntime, argv);
   return mod;

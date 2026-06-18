@@ -53,6 +53,8 @@ export function createRuntime(base) {
     resetProject: base.resetProject,
     clearHistory: base.clearHistory,
     abortSignal: base.abortSignal,
+    workspace: base.workspace,
+    llmConfigPath: base.llmConfigPath || "/etc/llm.json",
     env: base.env || {},
     log: base.log || console.log
   };
@@ -99,9 +101,9 @@ export function createRuntime(base) {
   };
   async function query(input, options = {}) {
     runtime.throwIfAborted();
-    const { baseUrl, apiKey, apiKeyEnv, model } = JSON.parse(await runtime.readFile("/etc/llm.json"));
+    const { baseUrl, apiKey, apiKeyEnv, model } = JSON.parse(await runtime.readFile(runtime.llmConfigPath));
     const key = apiKey || runtime.env[apiKeyEnv];
-    if (!key) throw new Error(`missing /etc/llm.json apiKey${apiKeyEnv ? ` or ${apiKeyEnv}` : ""}`);
+    if (!key) throw new Error(`missing ${runtime.llmConfigPath} apiKey${apiKeyEnv ? ` or ${apiKeyEnv}` : ""}`);
     const provider = createOpenAICompatible({ name: "byok", apiKey: key, baseURL: baseUrl });
     const messages = Array.isArray(input) ? input : [{ role: "user", content: String(input) }];
     const request = {

@@ -1,12 +1,16 @@
-DietSurf is a tiny shell over a virtual project.
+DietSurf is a tiny shell over two virtual project copies.
+
+/main is the live copy.
+/staging is the experimental copy.
+Both are ordinary filesystem paths. There is no hidden path mapping: use explicit paths such as /main/src/agent.js and /staging/src/agent.js.
 
 Use bash only when you need to inspect or change files, run JavaScript, or interact with the browser.
 If you can answer the user directly, answer with plain text and do not call bash.
 
 Available commands: cat, ls, pwd, cd, touch, rm, mkdir, cp, mv, echo, printf, sed, node, clear, reset, jobs, kill, which, grep, head, find, env, printenv, uname.
-Supported shell syntax: pipes, && sequencing, || fallback, simple > and >> redirects, 2>/dev/null, $ENV expansion, file globs like /src/*.js, and heredocs.
+Supported shell syntax: pipes, && sequencing, || fallback, simple > and >> redirects, 2>/dev/null, $ENV expansion, file globs like /main/src/*.js, and heredocs.
 Host package/build commands such as npm, npx, esbuild, and npm run build are not available inside DietSurf. Treat /package.json scripts as host metadata only.
-Edits to /src/agent.js and /src/ui.css reload in the side panel automatically; do not run a build command after editing them.
+Edits to /main/src/agent.js, /main/src/ui.css, /staging/src/agent.js, and /staging/src/ui.css reload their side-panel pane automatically; do not run a build command after editing them.
 
 Use heredocs for multi-line writes and scripts:
 cat > /path/file <<'EOF'

@@ -125,20 +125,23 @@ const extensionId = new URL(workerTarget.url()).host;
 const page = await browser.newPage();
 await attachPage(page, "sidepanel");
 await page.goto(`chrome-extension://${extensionId}/sidepanel.html`, { waitUntil: "networkidle0" });
-await page.waitForSelector("#dietsurf-prompt");
+await page.waitForSelector("#dietsurf-main-host");
 if (process.env.LILAC_API_KEY) {
-  const response = await page.evaluate((apiKey) => chrome.runtime.sendMessage({
-    type: "writeFile",
-    path: "/etc/llm.json",
-    text: JSON.stringify({
-      baseUrl: "https://api.getlilac.com/v1",
-      apiKey,
-      apiKeyEnv: "LILAC_API_KEY",
-      model: "minimaxai/minimax-m2.7"
-    }, null, 2)
-  }), process.env.LILAC_API_KEY);
-  if (!response?.ok) throw new Error(response?.error || "failed to seed /etc/llm.json");
-  console.log("seeded /etc/llm.json from LILAC_API_KEY");
+  const response = await page.evaluate((apiKey) => Promise.all(["main", "staging"].map((workspace) => (
+    chrome.runtime.sendMessage({
+      type: "writeFile",
+      path: `/${workspace}/etc/llm.json`,
+      text: JSON.stringify({
+        baseUrl: "https://api.getlilac.com/v1",
+        apiKey,
+        apiKeyEnv: "LILAC_API_KEY",
+        model: "minimaxai/minimax-m2.7"
+      }, null, 2)
+    })
+  ))), process.env.LILAC_API_KEY);
+  const failed = response.find((item) => !item?.ok);
+  if (failed) throw new Error(failed?.error || "failed to seed llm config");
+  console.log("seeded /main/etc/llm.json and /staging/etc/llm.json from LILAC_API_KEY");
 }
 
 console.log(`extension: chrome-extension://${extensionId}/sidepanel.html`);
