@@ -94,6 +94,11 @@ async function upgradeDefaultFiles() {
   ) || (
     text.includes("const clearScreen = () =>") &&
     !text.includes('await shell("clear")')
+  ) || (
+    text.includes("const history = []") &&
+    text.includes("JSON.stringify(history)")
+  ) || (
+    text.includes("Return exactly one bash tool call per step.")
   ));
   await upgradeDefaultFile("/src/ui.css", (text) => (
     text.includes("#dietsurf-prompt:focus") &&

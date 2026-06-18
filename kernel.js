@@ -1,4 +1,4 @@
-import { generateText } from "ai";
+import { generateText, jsonSchema, tool } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { Buffer } from "buffer";
 import { createEnvironment, execute } from "jslike";
@@ -451,14 +451,42 @@ export function createRuntime(base) {
     crypto: runtime.crypto,
     require: runtime.require
   };
-  runtime.llm = async function llm(input) {
+  async function query(input, options = {}) {
     const { baseUrl, apiKey, apiKeyEnv, model } = JSON.parse(await runtime.readFile("/etc/llm.json"));
     const key = apiKey || runtime.env[apiKeyEnv];
     if (!key) throw new Error(`missing /etc/llm.json apiKey${apiKeyEnv ? ` or ${apiKeyEnv}` : ""}`);
     const provider = createOpenAICompatible({ name: "byok", apiKey: key, baseURL: baseUrl });
     const messages = Array.isArray(input) ? input : [{ role: "user", content: String(input) }];
-    const { text } = await generateText({ model: provider(model), messages, temperature: 0 });
-    return text.trim();
+    const request = { model: provider(model), messages, temperature: 0, allowSystemInMessages: true };
+    if (options.tool === "bash") {
+      request.tools = {
+        bash: tool({
+          description: "Run one command in the DietSurf bash-like shell.",
+          inputSchema: jsonSchema({
+            type: "object",
+            properties: {
+              command: {
+                type: "string",
+                description: "The shell command to execute."
+              }
+            },
+            required: ["command"],
+            additionalProperties: false
+          })
+        })
+      };
+    }
+    const result = await generateText(request);
+    return {
+      text: result.text.trim(),
+      toolCalls: result.toolCalls,
+      messages: result.response.messages,
+      finishReason: result.finishReason
+    };
+  }
+  runtime.query = query;
+  runtime.llm = async function llm(input) {
+    return (await query(input)).text;
   };
   runtime.done = (value = "") => {
     const error = new Error("done");

@@ -1,47 +1,96 @@
 export async function main(runtime, argv) {
-  const { shell, llm, log } = runtime;
+  const { shell, query, log } = runtime;
   const goal = argv.join(" ").trim();
   if (!goal) {
     log("usage: node /src/agent.js \"goal\"");
     return "";
   }
 
-  const history = [];
+  const system = [
+    "You are running inside DietSurf, a tiny Mini-SWE-style browser agent.",
+    "You have one optional tool: bash.",
+    "The bash tool runs one command in a tiny bash-like shell.",
+    "Available commands: cat, ls, pwd, cd, touch, rm, mkdir, cp, mv, echo, node, clear, reset, jobs, kill.",
+    "Use bash only when you need to inspect or change files, run JavaScript, or interact with the browser.",
+    "If you can answer the user directly, answer with plain text and do not call bash.",
+    "Separate command names from arguments with spaces, like echo \"answer\", never echo\"answer\".",
+    "Use cat > file <<'EOF' ... EOF to write files.",
+    "Use node <<'EOF' ... EOF to run JavaScript.",
+    "Inside node, globals include process, Buffer, fs, path, crypto, require, chrome, shell, llm, readFile, writeFile, listFiles, log, and done.",
+    "Use fs.promises for Node-style file operations; it is backed by the virtual filesystem.",
+    "For browser page work, use chrome.tabs.query and chrome.scripting.executeScript.",
+    "When done, run node <<'EOF'\ndone(\"answer\")\nEOF.",
+    "If you use bash, call it at most once per step."
+  ].join("\n");
+
+  const tree = await shell("ls -R /");
+  const messages = [
+    { role: "system", content: system },
+    { role: "user", content: "Goal:\n" + goal + "\n\nInitial project tree:\n" + tree }
+  ];
+
+  const commandFrom = (response) => {
+    const call = (response.toolCalls || []).find((item) => item.toolName === "bash");
+    if (call) return { call, command: String(call.input?.command || "").trim() };
+    return { call: null, command: String(response.text || "").trim() };
+  };
+
+  const appendAssistant = (response, command, call) => {
+    if (call) {
+      messages.push({
+        role: "assistant",
+        content: [{
+          type: "tool-call",
+          toolCallId: call.toolCallId,
+          toolName: "bash",
+          input: { command }
+        }]
+      });
+    } else if (response.messages?.length) {
+      messages.push(...response.messages);
+    } else {
+      messages.push({ role: "assistant", content: command });
+    }
+  };
+
+  const appendObservation = (call, observation) => {
+    if (call) {
+      messages.push({
+        role: "tool",
+        content: [{
+          type: "tool-result",
+          toolCallId: call.toolCallId,
+          toolName: "bash",
+          output: { type: "json", value: observation }
+        }]
+      });
+    } else {
+      messages.push({ role: "user", content: "Observation:\n" + JSON.stringify(observation) });
+    }
+  };
+
   for (let step = 0; step < 20; step++) {
-    const tree = await shell("ls -R /");
-    const command = await llm(
-      "You are running inside a tiny bash-like shell.\n" +
-      "Available commands: cat, ls, pwd, cd, touch, rm, mkdir, cp, mv, echo, node, clear, reset, jobs, kill.\n" +
-      "Separate command names from arguments with spaces, like echo \"answer\", never echo\"answer\".\n" +
-      "Use cat > file <<'EOF' ... EOF to write files.\n" +
-      "Use node <<'EOF' ... EOF to run JavaScript.\n" +
-      "Inside node, globals include process, Buffer, fs, path, crypto, require, chrome, shell, llm, readFile, writeFile, listFiles, log, and done.\n" +
-      "Use fs.promises for Node-style file operations; it is backed by the virtual filesystem.\n" +
-      "For browser page work, use chrome.tabs.query and chrome.scripting.executeScript.\n" +
-      "When done, run node <<'EOF'\\ndone(\"answer\")\\nEOF.\n\n" +
-      "Return raw shell only. Do not use markdown fences, backticks, prose, or explanations.\n\n" +
-      "Example for reading the active tab title:\n" +
-      "node <<'EOF'\n" +
-      "const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })\n" +
-      "const result = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => document.title })\n" +
-      "done(result[0].result)\n" +
-      "EOF\n\n" +
-      "Project tree:\n" + tree + "\n\n" +
-      "Goal: " + goal + "\n\n" +
-      "History:\n" + JSON.stringify(history)
-    );
+    const response = await query(messages, { tool: "bash" });
+    const { call, command } = commandFrom(response);
+    appendAssistant(response, command, call);
+    if (!call) {
+      if (!command) throw new Error("model returned no response");
+      return command;
+    }
+    if (!command) throw new Error("model returned empty bash command");
 
     log("$ " + command);
     try {
       const result = await shell(command);
       if (result) log(result);
-      history.push({ command, result });
+      appendObservation(call, { returncode: 0, output: result || "" });
     } catch (error) {
       if (error && error.__dietsurfDone) {
-        log(String(error.value ?? ""));
         return error.value ?? "";
       }
-      throw error;
+      const output = error && error.message ? error.message : String(error);
+      log(output);
+      appendObservation(call, { returncode: 1, output });
     }
   }
   return "";
@@ -73,7 +122,6 @@ export function render(runtime) {
   app.append(root);
 
   let running = false;
-  let workerLogged = false;
   let statusTimer;
 
   const write = (value = "") => {
@@ -83,9 +131,13 @@ export function render(runtime) {
     log(text);
   };
 
+  const alreadyShown = (value) => {
+    const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    return output.textContent.trimEnd().endsWith(text.trimEnd());
+  };
+
   runtime.onLog?.((text) => {
     if (!running) return;
-    workerLogged = true;
     write(text);
   });
 
@@ -155,11 +207,10 @@ export function render(runtime) {
     write("$ " + command);
     const script = toShell(command);
     running = true;
-    workerLogged = false;
     startStatus(script);
     try {
       const result = await shell(script);
-      if (result && !workerLogged) write(result);
+      if (result && !alreadyShown(result)) write(result);
       stopStatus("done");
     } catch (error) {
       stopStatus("error");
