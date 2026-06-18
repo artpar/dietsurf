@@ -23,6 +23,11 @@ function logToPanel(...args) {
     .catch(() => undefined);
 }
 
+function notifyFileChanged(path) {
+  chrome.runtime.sendMessage({ type: "fileChanged", path })
+    .catch(() => undefined);
+}
+
 async function allFiles() {
   const rows = await db.files.toArray();
   return Object.fromEntries(rows.map((row) => [row.path, row.text]));
@@ -36,6 +41,7 @@ async function readFile(path) {
 
 async function writeFile(path, text) {
   await db.files.put({ path, text: String(text) });
+  notifyFileChanged(path);
 }
 
 async function listFiles(path = "/") {
@@ -46,6 +52,7 @@ async function listFiles(path = "/") {
 
 async function removeFile(path) {
   await db.files.delete(path);
+  notifyFileChanged(path);
 }
 
 async function migrateChromeStorage() {
@@ -70,6 +77,18 @@ async function packagedFiles() {
 async function resetProject() {
   await db.files.clear();
   await db.files.bulkPut(await packagedFiles());
+  notifyFileChanged("/");
+}
+
+async function seedMissingFiles() {
+  const files = [];
+  for (const path of PROJECT_FILES) {
+    if (await db.files.get(path)) continue;
+    const url = chrome.runtime.getURL(path.slice(1));
+    const response = await fetch(url);
+    files.push({ path, text: response.ok ? await response.text() : "" });
+  }
+  if (files.length) await db.files.bulkPut(files);
 }
 
 async function upgradeDefaultFile(path, shouldReplace) {
@@ -99,6 +118,9 @@ async function upgradeDefaultFiles() {
     text.includes("JSON.stringify(history)")
   ) || (
     text.includes("Return exactly one bash tool call per step.")
+  ) || (
+    text.includes("Available commands: cat, ls, pwd, cd, touch, rm, mkdir, cp, mv, echo, node, clear, reset, jobs, kill.") &&
+    text.includes("If you can answer the user directly")
   ));
   await upgradeDefaultFile("/src/ui.css", (text) => (
     text.includes("#dietsurf-prompt:focus") &&
@@ -109,6 +131,7 @@ async function upgradeDefaultFiles() {
 async function seedFiles() {
   await migrateChromeStorage();
   if (await db.files.get("/src/agent.js")) {
+    await seedMissingFiles();
     await upgradeDefaultFiles();
     return;
   }

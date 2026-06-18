@@ -10,7 +10,8 @@ export async function main(runtime, argv) {
     "You are running inside DietSurf, a tiny Mini-SWE-style browser agent.",
     "You have one optional tool: bash.",
     "The bash tool runs one command in a tiny bash-like shell.",
-    "Available commands: cat, ls, pwd, cd, touch, rm, mkdir, cp, mv, echo, node, clear, reset, jobs, kill.",
+    "Available commands: cat, ls, pwd, cd, touch, rm, mkdir, cp, mv, echo, node, clear, reset, jobs, kill, which, grep, head, find.",
+    "Pipes, || fallback, simple > redirects, 2>/dev/null, and file globs like /src/*.js are supported.",
     "Use bash only when you need to inspect or change files, run JavaScript, or interact with the browser.",
     "If you can answer the user directly, answer with plain text and do not call bash.",
     "Separate command names from arguments with spaces, like echo \"answer\", never echo\"answer\".",
@@ -174,7 +175,7 @@ export function render(runtime) {
     stopStatus("idle");
   };
 
-  const shellCommands = new Set(["cat", "ls", "pwd", "cd", "touch", "rm", "mkdir", "cp", "mv", "echo", "node", "clear", "reset", "jobs", "kill"]);
+  const shellCommands = new Set(["cat", "ls", "pwd", "cd", "touch", "rm", "mkdir", "cp", "mv", "echo", "node", "clear", "reset", "jobs", "kill", "which", "grep", "head", "find"]);
   const toShell = (value) => {
     const first = value.trim().split(/\s+/, 1)[0];
     if (value.includes("\n") || shellCommands.has(first)) return value;

@@ -1,10 +1,35 @@
 import { loadModule, toErrorText } from "./kernel.js";
 
 const logListeners = new Set();
+let busy = 0;
+let pendingReload = false;
+let reloadTimer = 0;
+
+function reloadsUi(path) {
+  return path === "/" || path === "/src/agent.js" || path === "/src/ui.css";
+}
+
+function scheduleReload() {
+  pendingReload = false;
+  clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(() => main().catch((error) => fallback(toErrorText(error))), 50);
+}
+
+function requestReload() {
+  if (busy) {
+    pendingReload = true;
+    return;
+  }
+  scheduleReload();
+}
 
 chrome.runtime.onMessage.addListener((message) => {
-  if (!message || message.type !== "workerLog") return false;
-  for (const listener of logListeners) listener(message.text);
+  if (!message) return false;
+  if (message.type === "workerLog") {
+    for (const listener of logListeners) listener(message.text);
+  } else if (message.type === "fileChanged" && reloadsUi(message.path)) {
+    requestReload();
+  }
   return false;
 });
 
@@ -24,16 +49,32 @@ function fallback(message) {
 }
 
 async function main() {
-  const style = document.createElement("style");
+  logListeners.clear();
+
+  let style = document.getElementById("dietsurf-style");
+  if (!style) {
+    style = document.createElement("style");
+    style.id = "dietsurf-style";
+    document.head.append(style);
+  }
   style.textContent = await send({ type: "readFile", path: "/src/ui.css" }).catch(() => "");
-  document.head.append(style);
+
+  const run = async (fn) => {
+    busy++;
+    try {
+      return await fn();
+    } finally {
+      busy--;
+      if (!busy && pendingReload) scheduleReload();
+    }
+  };
 
   const uiRuntime = {
     document,
     readFile: (path) => send({ type: "readFile", path }),
-    writeFile: (path, text) => send({ type: "writeFile", path, text }),
+    writeFile: (path, text) => run(() => send({ type: "writeFile", path, text })),
     listFiles: (path = "/") => send({ type: "listFiles", path }),
-    shell: (command) => send({ type: "shell", command }),
+    shell: (command) => run(() => send({ type: "shell", command })),
     onLog(listener) {
       logListeners.add(listener);
       return () => logListeners.delete(listener);
