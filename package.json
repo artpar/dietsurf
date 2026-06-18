@@ -6,7 +6,8 @@
   "scripts": {
     "build": "esbuild worker.js sidepanel.js --bundle --format=esm --target=chrome120 --outdir=dist",
     "node": "node bin/dietsurf-node.js",
-    "dev:extension": "node scripts/extension-logger.mjs"
+    "dev:extension": "node scripts/extension-logger.mjs",
+    "e2e:real-user": "node scripts/e2e-real-user.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "2.0.51",

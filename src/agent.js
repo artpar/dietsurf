@@ -14,7 +14,16 @@ export async function main(runtime, argv) {
       "Available commands: cat, ls, pwd, cd, touch, rm, mkdir, cp, mv, echo, node, jobs, kill.\n" +
       "Use cat > file <<'EOF' ... EOF to write files.\n" +
       "Use node <<'EOF' ... EOF to run JavaScript.\n" +
+      "Inside node, globals include chrome, shell, llm, readFile, writeFile, listFiles, log, and done.\n" +
+      "For browser page work, use chrome.tabs.query and chrome.scripting.executeScript.\n" +
       "When done, run node <<'EOF'\\ndone(\"answer\")\\nEOF.\n\n" +
+      "Return raw shell only. Do not use markdown fences, backticks, prose, or explanations.\n\n" +
+      "Example for reading the active tab title:\n" +
+      "node <<'EOF'\n" +
+      "const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })\n" +
+      "const result = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => document.title })\n" +
+      "done(result[0].result)\n" +
+      "EOF\n\n" +
       "Project tree:\n" + tree + "\n\n" +
       "Goal: " + goal + "\n\n" +
       "History:\n" + JSON.stringify(history)
