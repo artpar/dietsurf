@@ -17,7 +17,7 @@
     "buffer": "^6.0.3",
     "dexie": "^4.4.4",
     "dotenv": "^17.4.2",
-    "jslike": "1.8.11",
+    "jslike": "1.8.12",
     "path-browserify": "^1.0.1",
     "process": "^0.11.10",
     "puppeteer-core": "25.1.0",
